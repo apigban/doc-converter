@@ -255,6 +255,8 @@ func (c *Converter) processURL(urlStr string, selector string) (string, error) {
 	return htmlContent, nil
 }
 
+//go:build !integration
+
 // isPublicURL checks if a URL resolves to a public IP address to prevent SSRF attacks.
 func (c *Converter) isPublicURL(urlStr string) (bool, error) {
 	parsedURL, err := url.Parse(urlStr)
@@ -293,25 +295,7 @@ func (c *Converter) getSanitizedTitle(doc *goquery.Document, fallbackURL string)
 			title = "untitled"
 		}
 	}
-	return c.SanitizeFilename(title)
-}
-
-// SanitizeFilename converts a string to a valid filename by:
-// 1. Converting to lowercase
-// 2. Replacing spaces with underscores
-// 3. Removing any characters that aren't alphanumeric or underscores
-func (c *Converter) SanitizeFilename(s string) string {
-	// Convert to lowercase
-	s = strings.ToLower(s)
-
-	// Replace spaces with underscores
-	s = strings.ReplaceAll(s, " ", "_")
-
-	// Remove any character that is not alphanumeric or underscore
-	reg := regexp.MustCompile("[^a-z0-9_]+")
-	s = reg.ReplaceAllString(s, "")
-
-	return s
+	return SanitizeFilename(title)
 }
 
 // getMetadata extracts relevant metadata from the goquery document.
