@@ -29,6 +29,7 @@ var upgrader = websocket.Upgrader{
 }
 
 func conversionHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("INFO: Received new conversion request")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to upgrade connection: %v", err)
@@ -47,6 +48,8 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 	var req ConversionRequest
 	if err := json.Unmarshal(msg, &req); err != nil {
 		log.Printf("ERROR: Invalid request format: %v", err)
+		// Send error message to client
+		conn.WriteMessage(websocket.TextMessage, []byte("Error: Invalid request format"))
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, "Invalid JSON format"))
 		return
 	}
@@ -79,14 +82,16 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send the final summary, which includes the DownloadID
 	summary := <-summaryChan
-	if err := conn.WriteJSON(summary); err != nil {
-		log.Printf("ERROR: Failed to write summary to WebSocket: %v", err)
+
+	// Create a response map to include the full download URL
+	response := map[string]interface{}{
+		"status":       "completed",
+		"summary":      summary,
+		"download_url": fmt.Sprintf("/api/download/%s", summary.DownloadID),
 	}
 
-	// Send a close message to the client
-	err = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	if err != nil {
-		log.Printf("ERROR: Failed to write close message: %v", err)
+	if err := conn.WriteJSON(response); err != nil {
+		log.Printf("ERROR: Failed to write summary to WebSocket: %v", err)
 	}
 }
 
@@ -100,7 +105,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Locate temporary directory
 	dirPath := filepath.Join("tmp", "downloads", id)
-	defer os.RemoveAll(dirPath) // Defer cleanup
+	// defer os.RemoveAll(dirPath) // TODO: Temporary solution to Premature Directory Deletion
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		http.NotFound(w, r)
 		return
