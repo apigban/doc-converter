@@ -1,13 +1,10 @@
-// Package converter provides the core logic for the doc-converter tool.
 package converter
 
 import (
 	"bytes"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -210,9 +207,9 @@ func (c *Converter) Convert(urls []string, selector string) (<-chan Result, <-ch
 
 		summary := Summary{
 			TotalURLs:      len(urls),
-			Successful:   successCount,
-			Failed:       errorCount,
-			FailedURLs:   failedURLs,
+			Successful:     successCount,
+			Failed:         errorCount,
+			FailedURLs:     failedURLs,
 			ProcessingTime: time.Since(startTime).String(),
 			DownloadID:     c.DownloadID,
 		}
@@ -255,28 +252,26 @@ func (c *Converter) processURL(urlStr string, selector string) (string, error) {
 	return htmlContent, nil
 }
 
-//go:build !integration
-
 // isPublicURL checks if a URL resolves to a public IP address to prevent SSRF attacks.
-func (c *Converter) isPublicURL(urlStr string) (bool, error) {
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return false, err
-	}
+// func (c *Converter) isPublicURL(urlStr string) (bool, error) {
+// 	parsedURL, err := url.Parse(urlStr)
+// 	if err != nil {
+// 		return false, err
+// 	}
 
-	ips, err := net.LookupIP(parsedURL.Hostname())
-	if err != nil {
-		return false, err
-	}
+// 	ips, err := net.LookupIP(parsedURL.Hostname())
+// 	if err != nil {
+// 		return false, err
+// 	}
 
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
-			return false, nil // Found a non-public IP
-		}
-	}
+// 	for _, ip := range ips {
+// 		if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
+// 			return false, nil // Found a non-public IP
+// 		}
+// 	}
 
-	return true, nil
-}
+// 	return true, nil
+// }
 
 // getSanitizedTitle extracts the title from the document or uses the fallback URL
 // to create a valid filename
