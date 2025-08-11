@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Doc Converter</title>
+    <title>Doc Converter - Dynamic Grid</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,10 +38,15 @@
             border-radius: 4px;
             color: #d0d0d0;
         }
+        .form-input:disabled {
+            background-color: #333;
+        }
         .log-line {
             font-family: 'Courier New', Courier, monospace;
             white-space: pre-wrap;
             word-break: break-all;
+            font-size: 0.875rem; /* 14px */
+            line-height: 1.25rem; /* 20px */
         }
         .log-line .level-info { color: #3498db; }
         .log-line .level-warn { color: #f1c40f; }
@@ -49,45 +54,43 @@
     </style>
 </head>
 <body class="p-4 md:p-8">
-    <div class="max-w-4xl mx-auto space-y-6">
-        <header class="text-center">
+    <div class="max-w-6xl mx-auto">
+        <header class="text-center mb-6">
             <h1 class="text-3xl font-bold">Doc Converter</h1>
             <p class="text-gray-400">Convert web pages to downloadable artifacts.</p>
         </header>
 
-        <!-- Conversion Job Panel -->
-        <div id="job-panel" class="panel p-6">
-            <h2 class="text-xl font-semibold mb-4">Conversion Job</h2>
-            <form id="conversion-form" class="space-y-4">
-                <div>
-                    <label for="urls" class="block text-sm font-medium mb-1">URLs (one per line)</label>
-                    <textarea id="urls" name="urls" rows="5" class="form-input w-full p-2" required></textarea>
-                </div>
-                <div>
-                    <label for="selector" class="block text-sm font-medium mb-1">CSS Selector (e.g., #main, .content)</label>
-                    <input type="text" id="selector" name="selector" class="form-input w-full p-2" required>
-                </div>
-                <button id="run-btn" type="submit" class="btn-primary py-2 px-4 rounded-md w-full">
-                    Run Conversion
-                </button>
-            </form>
-        </div>
-
-        <!-- Log Stream Panel -->
-        <div id="log-panel" class="panel p-6 hidden">
-            <h2 class="text-xl font-semibold mb-4">Log Stream</h2>
-            <div id="log-container" class="bg-black rounded p-4 h-64 overflow-y-auto">
-                <!-- Logs will be streamed here -->
+        <div id="main-grid" class="grid grid-cols-1 md:grid-cols-1 gap-6">
+            <!-- Form Panel -->
+            <div class="panel p-6">
+                <h2 class="text-xl font-semibold mb-4">Conversion Job</h2>
+                <form id="conversion-form" class="space-y-4">
+                    <div>
+                        <label for="urls" class="block text-sm font-medium mb-1">URLs (one per line)</label>
+                        <textarea id="urls" name="urls" rows="8" class="form-input w-full p-2" placeholder="https://example.com/page1&#x0a;https://example.com/page2" required></textarea>
+                    </div>
+                    <div>
+                        <label for="selector" class="block text-sm font-medium mb-1">CSS Selector</label>
+                        <input type="text" id="selector" name="selector" class="form-input w-full p-2" placeholder="#main-content, .article-body" required>
+                    </div>
+                    <button id="run-btn" type="submit" class="btn-primary py-2 px-4 rounded-md w-full">
+                        Run Conversion
+                    </button>
+                </form>
             </div>
-        </div>
 
-        <!-- Results Panel -->
-        <div id="results-panel" class="panel p-6 hidden">
-            <h2 class="text-xl font-semibold mb-4">Results</h2>
-            <div id="results-summary" class="mb-4"></div>
-            <a id="download-btn" href="#" class="btn-primary py-2 px-4 rounded-md inline-block hidden" download>
-                Download Artifacts
-            </a>
+            <!-- Status Panel (initially hidden) -->
+            <div id="status-panel" class="panel p-6 hidden">
+                <div id="results-container" class="hidden pb-4 mb-4 border-b border-gray-700">
+                    <h2 class="text-xl font-semibold mb-2">Results</h2>
+                    <div id="results-summary" class="mb-4"></div>
+                    <a id="download-btn" href="#" class="btn-primary py-2 px-4 rounded-md inline-block" download>
+                        Download Artifacts
+                    </a>
+                </div>
+                <h2 class="text-xl font-semibold mb-4">Log Stream</h2>
+                <div id="log-container" class="bg-black rounded p-4 h-full overflow-y-auto"></div>
+            </div>
         </div>
     </div>
 
@@ -95,29 +98,40 @@
         document.addEventListener('DOMContentLoaded', () => {
             const conversionForm = document.getElementById('conversion-form');
             const runBtn = document.getElementById('run-btn');
-            const logPanel = document.getElementById('log-panel');
+            const mainGrid = document.getElementById('main-grid');
+            const statusPanel = document.getElementById('status-panel');
             const logContainer = document.getElementById('log-container');
-            const resultsPanel = document.getElementById('results-panel');
+            const resultsContainer = document.getElementById('results-container');
             const resultsSummary = document.getElementById('results-summary');
             const downloadBtn = document.getElementById('download-btn');
-
+            const urlInput = document.getElementById('urls');
+            const selectorInput = document.getElementById('selector');
+            
             let socket;
 
             conversionForm.addEventListener('submit', (e) => {
                 e.preventDefault();
+                
+                // Change layout
+                mainGrid.classList.remove('md:grid-cols-1');
+                mainGrid.classList.add('md:grid-cols-2');
+                statusPanel.classList.remove('hidden');
 
-                // Reset UI
-                logPanel.classList.remove('hidden');
-                logContainer.innerHTML = '';
-                resultsPanel.classList.add('hidden');
-                downloadBtn.classList.add('hidden');
+                // Disable form
+                urlInput.disabled = true;
+                selectorInput.disabled = true;
                 runBtn.disabled = true;
                 runBtn.textContent = 'Processing...';
 
-                const urls = document.getElementById('urls').value.split('\\n').filter(Boolean);
+                // Reset UI
+                logContainer.innerHTML = '';
+                resultsContainer.classList.add('hidden');
+                
+                const urls = document.getElementById('urls').value.split('\n').filter(Boolean);
                 const selector = document.getElementById('selector').value;
 
-                const wsUrl = `ws://${window.location.host}/api/convert-ws`;
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${wsProtocol}//${window.location.host}/api/convert-ws`;
                 socket = new WebSocket(wsUrl);
 
                 socket.onopen = () => {
@@ -128,38 +142,15 @@
                 };
 
                 socket.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-
-                    if (data.log) {
-                        const level = data.level || 'info';
-                        log(level, data.log);
-                    }
-
-                    if (data.status === 'completed') {
-                        socket.close();
-                        runBtn.disabled = false;
-                        runBtn.textContent = 'Run Conversion';
-
-                        resultsPanel.classList.remove('hidden');
-                        resultsSummary.textContent = `Job completed. Artifacts are ready for download.`;
-
-                        if (data.download_url) {
-                            downloadBtn.href = data.download_url;
-                            downloadBtn.classList.remove('hidden');
-                        }
-                    } else if (data.status === 'failed') {
-                        socket.close();
-                        runBtn.disabled = false;
-                        runBtn.textContent = 'Run Conversion';
-                        resultsPanel.classList.remove('hidden');
-                        resultsSummary.textContent = `Job failed: ${data.error}`;
-                        log('error', `Job failed: ${data.error}`);
-                    }
+                    handleSocketMessage(event.data);
                 };
 
                 socket.onerror = (error) => {
-                    log('error', 'WebSocket error. Check server connection.');
+                    log('error', 'WebSocket error. Please check the server connection.');
                     console.error('WebSocket Error:', error);
+                    // Re-enable form on error
+                    urlInput.disabled = false;
+                    selectorInput.disabled = false;
                     runBtn.disabled = false;
                     runBtn.textContent = 'Run Conversion';
                 };
@@ -169,15 +160,44 @@
                 };
             });
 
+            function handleSocketMessage(data) {
+                const parsedData = JSON.parse(data);
+
+                if (parsedData.log) {
+                    const level = parsedData.level || 'info';
+                    log(level, parsedData.log);
+                }
+
+                // Handle final status message which contains summary and download_url
+                if (parsedData.status === 'completed' || parsedData.status === 'failed') {
+                    // Re-enable form
+                    urlInput.disabled = false;
+                    selectorInput.disabled = false;
+                    runBtn.disabled = false;
+                    runBtn.textContent = 'Run Conversion';
+
+                    resultsContainer.classList.remove('hidden');
+                    let summaryText = parsedData.status === 'completed' 
+                        ? `Job completed. Successful: ${parsedData.summary.successful}, Failed: ${parsedData.summary.failed}.`
+                        : `Job failed: ${parsedData.error || 'An unknown error occurred.'}`;
+                    
+                    resultsSummary.textContent = summaryText;
+
+                    if (parsedData.download_url) {
+                        downloadBtn.href = parsedData.download_url;
+                        downloadBtn.classList.remove('hidden');
+                    } else {
+                        downloadBtn.classList.add('hidden');
+                    }
+                }
+            }
+
             function log(level, message) {
                 const logLine = document.createElement('div');
                 logLine.className = 'log-line';
-
                 const timestamp = new Date().toISOString();
-
                 const coloredMessage = `<span class="level-${level}">msg="${message}"</span>`;
-                logLine.innerHTML = `t=${timestamp} level=${level} ${coloredMessage}`;
-
+                logLine.innerHTML = `<span class="text-gray-500">t=${timestamp}</span> <span class="font-bold level-${level}">${level.toUpperCase()}</span> ${coloredMessage}`;
                 logContainer.appendChild(logLine);
                 logContainer.scrollTop = logContainer.scrollHeight;
             }
