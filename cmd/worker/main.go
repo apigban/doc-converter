@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -45,20 +46,23 @@ func main() {
 	)
 	failOnError(err, "Failed to set QoS")
 
+	consumerTag := "doc-converter-worker"
 	msgs, err := ch.Consume(
-		q.Name, // queue
-		"",     // consumer
-		false,  // auto-ack is false. We will manually acknowledge messages.
-		false,  // exclusive
-		false,  // no-local
-		false,  // no-wait
-		nil,    // args
+		q.Name,      // queue
+		consumerTag, // consumer
+		false,       // auto-ack is false. We will manually acknowledge messages.
+		false,       // exclusive
+		false,       // no-local
+		false,       // no-wait
+		nil,         // args
 	)
 	failOnError(err, "Failed to register a consumer")
 
-	var forever chan struct{}
+	var wg sync.WaitGroup
+	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		for d := range msgs {
 			log.Printf("Received a message: %s", d.Body)
 			var job queue.ConversionJob
@@ -85,10 +89,13 @@ func main() {
 			log.Printf("INFO: Conversion finished for job %s. Successful: %d, Failed: %d",
 				job.DownloadID, summary.Successful, summary.Failed)
 
-			// *** ADD THIS PART ***
 			// Publish the final summary back for the backend to hear
-			publishResults(ch, &summary)
-			// *********************
+			if err := publishResults(ch, &summary); err != nil {
+				log.Printf("ERROR: Failed to publish results for job %s, not acknowledging message: %v", job.DownloadID, err)
+				// Nack the message and requeue it so it can be processed again.
+				d.Nack(false, true)
+				continue
+			}
 
 			// Acknowledge the message now that the work is done.
 			d.Ack(false)
@@ -102,8 +109,14 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
 
-	log.Println("Shutting down worker...")
-	<-forever
+	log.Println("INFO: Shutting down worker...")
+
+	// Gracefully stop the consumer
+	if err := ch.Cancel(consumerTag, false); err != nil {
+		log.Printf("ERROR: Failed to cancel consumer: %v", err)
+	}
+	wg.Wait()
+	log.Println("INFO: Worker has shut down.")
 }
 
 func failOnError(err error, msg string) {
@@ -112,7 +125,7 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func publishResults(ch *amqp.Channel, summary *converter.Summary) {
+func publishResults(ch *amqp.Channel, summary *converter.Summary) error {
 	resultsExchange := "results_fanout"
 	err := ch.ExchangeDeclare(
 		resultsExchange, // name
@@ -125,13 +138,13 @@ func publishResults(ch *amqp.Channel, summary *converter.Summary) {
 	)
 	if err != nil {
 		log.Printf("ERROR: Failed to declare results exchange: %v", err)
-		return
+		return err
 	}
 
 	body, err := json.Marshal(summary)
 	if err != nil {
 		log.Printf("ERROR: Failed to marshal summary: %v", err)
-		return
+		return err
 	}
 
 	err = ch.Publish(
@@ -149,4 +162,5 @@ func publishResults(ch *amqp.Channel, summary *converter.Summary) {
 	} else {
 		log.Printf("INFO: Published completion status for job %s", summary.DownloadID)
 	}
+	return err
 }

@@ -5,8 +5,8 @@ services:
   rabbitmq:
     image: "rabbitmq:3.12-management-alpine"
     ports:
-      - "5672:5672"  # AMQP port for services
-      - "15672:15672" # Management UI for monitoring queues
+      - "5672:5672"
+      - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
@@ -23,6 +23,8 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    volumes: # <-- ADD THIS
+      - doc-converter-data:/app/tmp/downloads
 
   # Go Worker (Consumer)
   worker:
@@ -30,10 +32,12 @@ services:
       context: .
       dockerfile: Dockerfile-worker
     deploy:
-      replicas: 2 # Example: run 2 worker instances
+      replicas: 2
     depends_on:
       rabbitmq:
         condition: service_healthy
+    volumes: # <-- AND THIS
+      - doc-converter-data:/app/tmp/downloads
 
   # Caddy Frontend
   frontend:
@@ -41,8 +45,12 @@ services:
       context: .
       dockerfile: Dockerfile-frontend
     ports:
-      - "80:80"       # HTTP
-      - "443:443"     # HTTPS (Caddy will manage certs automatically)
-      - "443:443/udp" # For HTTP/3
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
     depends_on:
       - backend
+
+# Declare the shared volume at the top level
+volumes: # <-- AND THIS WHOLE BLOCK
+  doc-converter-data:
