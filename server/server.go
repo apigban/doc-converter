@@ -2,7 +2,7 @@ package server
 
 import (
 	"archive/zip"
-	"doc-converter/pkg/converter" // <-- Add this import
+	"doc-converter/pkg/converter"
 	"doc-converter/pkg/queue"
 	"encoding/json"
 	"fmt"
@@ -12,10 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync" // <-- Add this import
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	amqp "github.com/rabbitmq/amqp091-go" // <-- THIS IS THE FIX!
 )
 
 type ConversionRequest struct {
@@ -30,12 +31,10 @@ var (
 		},
 	}
 	rabbitMQClient *queue.RabbitMQClient
-	// This map will store active WebSocket connections, keyed by job ID.
-	clients      = make(map[string]*websocket.Conn)
-	clientsMutex = &sync.Mutex{}
+	clients        = make(map[string]*websocket.Conn)
+	clientsMutex   = &sync.Mutex{}
 )
 
-// This function listens for results from the workers
 func listenForResults() {
 	amqpURL := os.Getenv("AMQP_URL")
 	if amqpURL == "" {
@@ -56,34 +55,34 @@ func listenForResults() {
 
 	resultsExchange := "results_fanout"
 	err = ch.ExchangeDeclare(
-		resultsExchange, // name
-		"fanout",        // type
-		true,            // durable
-		false,           // auto-deleted
-		false,           // internal
-		false,           // no-wait
-		nil,             // arguments
+		resultsExchange,
+		"fanout",
+		true,
+		false,
+		false,
+		false,
+		nil,
 	)
 	if err != nil {
 		log.Fatalf("Result listener failed to declare exchange: %v", err)
 	}
 
 	q, err := ch.QueueDeclare(
-		"",    // name (let RabbitMQ generate a random, temporary name)
-		false, // durable
-		true,  // delete when unused
-		true,  // exclusive
-		false, // no-wait
-		nil,   // arguments
+		"",
+		false,
+		true,
+		true,
+		false,
+		nil,
 	)
 	if err != nil {
 		log.Fatalf("Result listener failed to declare queue: %v", err)
 	}
 
 	err = ch.QueueBind(
-		q.Name,          // queue name
-		"",              // routing key
-		resultsExchange, // exchange
+		q.Name,
+		"",
+		resultsExchange,
 		false,
 		nil,
 	)
@@ -92,13 +91,13 @@ func listenForResults() {
 	}
 
 	msgs, err := ch.Consume(
-		q.Name, // queue
-		"",     // consumer
-		true,   // auto-ack
-		false,  // exclusive
-		false,  // no-local
-		false,  // no-wait
-		nil,    // args
+		q.Name,
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil,
 	)
 	if err != nil {
 		log.Fatalf("Result listener failed to register a consumer: %v", err)
@@ -115,19 +114,15 @@ func listenForResults() {
 		log.Printf("INFO: Received completion summary for job %s", summary.DownloadID)
 
 		clientsMutex.Lock()
-		// Find the client associated with this job ID
 		if conn, ok := clients[summary.DownloadID]; ok {
-			// Prepare the final message for the UI
 			finalResponse := map[string]interface{}{
 				"status":       "completed",
 				"summary":      summary,
 				"download_url": fmt.Sprintf("/api/download/%s", summary.DownloadID),
 			}
-			// Send the completion message
 			if err := conn.WriteJSON(finalResponse); err != nil {
 				log.Printf("ERROR: Failed to write completion to WebSocket for job %s: %v", summary.DownloadID, err)
 			}
-			// Clean up the connection from the map
 			delete(clients, summary.DownloadID)
 		}
 		clientsMutex.Unlock()
@@ -141,8 +136,6 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ERROR: Failed to upgrade connection: %v", err)
 		return
 	}
-	// Note: We don't close the connection here anymore with defer.
-	// It stays open to receive the final result.
 
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
@@ -159,12 +152,10 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 
 	downloadID := uuid.New().String()
 
-	// Register the client connection before publishing the job
 	clientsMutex.Lock()
 	clients[downloadID] = conn
 	clientsMutex.Unlock()
 
-	// Ensure we clean up if the client disconnects prematurely
 	conn.SetCloseHandler(func(code int, text string) error {
 		log.Printf("INFO: WebSocket closed for job %s with code %d", downloadID, code)
 		clientsMutex.Lock()
@@ -187,7 +178,6 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("INFO: Job %s queued successfully", downloadID)
 
-	// Send an initial "log" message back to the UI, not the final response.
 	initialLog := map[string]interface{}{
 		"log":   fmt.Sprintf("Job successfully queued with ID: %s. Waiting for worker...", downloadID),
 		"level": "info",
@@ -253,9 +243,7 @@ func Run() {
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
-	// We don't defer the close here, as the result listener needs it.
 
-	// Start the result listener in the background
 	go listenForResults()
 
 	http.HandleFunc("/api/convert-ws", conversionHandler)
