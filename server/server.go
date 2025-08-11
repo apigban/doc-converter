@@ -156,6 +156,11 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 // Run starts the web server.
 func Run() {
+	// Serve static files from the 'frontend' directory
+	fs := http.FileServer(http.Dir("./frontend"))
+	http.Handle("/", fs)
+
+	// Your existing API handlers
 	http.HandleFunc("/api/convert-ws", conversionHandler)
 	http.HandleFunc("/api/download/", downloadHandler)
 
