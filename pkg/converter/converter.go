@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/google/uuid"
 	"gopkg.in/yaml.v2"
 )
 
@@ -49,31 +48,44 @@ type Converter struct {
 	DownloadID string
 }
 
-// NewConverter creates a new Converter with a secure HTTP client and output configuration.
-// If outputDir is empty, a temporary directory with a UUID will be created.
-func NewConverter(outputDir string) (*Converter, error) {
-	var finalOutputDir string
-	var downloadID string
-
-	if outputDir == "" {
-		// Server mode: create a temporary directory
-		downloadID = uuid.New().String()
-		finalOutputDir = filepath.Join("tmp", "downloads", downloadID)
-	} else {
-		// CLI mode: use the provided directory
-		finalOutputDir = outputDir
+// NewConverterForJob creates a new Converter for a background job.
+// It uses the downloadID to create a unique, predictable directory for output files.
+func NewConverterForJob(downloadID string) (*Converter, error) {
+	if downloadID == "" {
+		return nil, fmt.Errorf("downloadID cannot be empty for a job-based conversion")
 	}
 
-	if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create output directory: %w", err)
+	outputDir := filepath.Join("tmp", "downloads", downloadID)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory %s: %w", outputDir, err)
 	}
 
 	return &Converter{
 		Client: &http.Client{
 			Timeout: httpTimeout,
 		},
-		OutputDir:  finalOutputDir,
+		OutputDir:  outputDir,
 		DownloadID: downloadID,
+	}, nil
+}
+
+// NewConverterForCLI creates a new Converter for a command-line execution.
+// It uses a user-provided directory path for the output.
+func NewConverterForCLI(outputDir string) (*Converter, error) {
+	if outputDir == "" {
+		return nil, fmt.Errorf("output directory must be specified for CLI conversion")
+	}
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory %s: %w", outputDir, err)
+	}
+
+	return &Converter{
+		Client: &http.Client{
+			Timeout: httpTimeout,
+		},
+		OutputDir: outputDir,
+		// DownloadID is not relevant for CLI runs.
 	}, nil
 }
 

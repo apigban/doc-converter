@@ -1,0 +1,12 @@
+# Caddyfile
+:80 {
+    # Set this path to your site's directory.
+    root * /srv
+
+    # Enable the static file server.
+    file_server
+
+    # Reverse proxy WebSocket and download requests to the backend API.
+    # Caddy will forward any request starting with /api/ to the backend service.
+    reverse_proxy /api/* http://backend:8080
+}

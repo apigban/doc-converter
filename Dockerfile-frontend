@@ -1,0 +1,23 @@
+# Dockerfile for the Caddy frontend
+
+# ---- Build Stage ----
+# This stage is to copy the source files to a known location
+FROM alpine:latest as builder
+
+WORKDIR /app
+
+# Copy the frontend files and the Caddyfile
+COPY frontend/ /app/frontend/
+COPY Caddyfile /app/Caddyfile
+
+# ---- Final Stage ----
+FROM caddy:2-alpine
+
+WORKDIR /srv
+
+# Copy the static files and the Caddyfile from the builder stage
+COPY --from=builder /app/frontend/ .
+COPY --from=builder /app/Caddyfile /etc/caddy/Caddyfile
+
+# Expose the default Caddy port
+EXPOSE 80

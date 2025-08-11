@@ -1,0 +1,23 @@
+# Dockerfile for the Go worker
+
+# ---- Build Stage ----
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Assume you create a new main package or command for the worker
+RUN CGO_ENABLED=0 go build -o /app/doc-converter-worker ./cmd/worker
+
+# ---- Final Stage ----
+FROM alpine:latest
+
+WORKDIR /app
+
+COPY --from=builder /app/doc-converter-worker .
+
+CMD ["/app/doc-converter-worker"]

@@ -2,7 +2,7 @@ package server
 
 import (
 	"archive/zip"
-	"doc-converter/pkg/converter"
+	"doc-converter/pkg/queue"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -21,12 +22,15 @@ type ConversionRequest struct {
 	Selector string   `json:"selector"`
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// TODO: Restrict this to your frontend's origin in production
-		return true
-	},
-}
+var (
+	upgrader    = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			// TODO: Restrict this to your frontend's origin in production
+			return true
+		},
+	}
+	rabbitMQClient *queue.RabbitMQClient
+)
 
 func conversionHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("INFO: Received new conversion request")
@@ -48,7 +52,6 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 	var req ConversionRequest
 	if err := json.Unmarshal(msg, &req); err != nil {
 		log.Printf("ERROR: Invalid request format: %v", err)
-		// Send error message to client
 		conn.WriteMessage(websocket.TextMessage, []byte("Error: Invalid request format"))
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, "Invalid JSON format"))
 		return
@@ -60,40 +63,38 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Instantiate the converter. Passing an empty string for outputDir triggers
-	// the creation of a temporary directory for this conversion.
-	c, err := converter.NewConverter("")
-	if err != nil {
-		log.Printf("ERROR: Failed to create new converter: %v", err)
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Failed to initialize converter"))
+	// Generate a unique ID for this conversion job
+	downloadID := uuid.New().String()
+
+	// Create the job payload
+	job := &queue.ConversionJob{
+		URLs:       req.URLs,
+		Selector:   req.Selector,
+		DownloadID: downloadID,
+	}
+
+	// Publish the job to RabbitMQ
+	if err := rabbitMQClient.PublishJob(job); err != nil {
+		log.Printf("ERROR: Failed to publish job to queue: %v", err)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Failed to queue job"))
 		return
 	}
 
-	resultsChan, summaryChan := c.Convert(req.URLs, req.Selector)
+	log.Printf("INFO: Job %s queued successfully", downloadID)
 
-	// Stream results back to the client
-	// The converter is now handling the file writing. The server just relays the status.
-	for result := range resultsChan {
-		if err := conn.WriteJSON(result); err != nil {
-			log.Printf("ERROR: Failed to write result to WebSocket: %v", err)
-			break // Stop if we can't write to the client
-		}
-	}
-
-	// Send the final summary, which includes the DownloadID
-	summary := <-summaryChan
-
-	// Create a response map to include the full download URL
+	// Create a response map to inform the client
 	response := map[string]interface{}{
-		"status":       "completed",
-		"summary":      summary,
-		"download_url": fmt.Sprintf("/api/download/%s", summary.DownloadID),
+		"status":       "queued",
+		"message":      "Your conversion job has been queued successfully.",
+		"download_id":  downloadID,
+		"download_url": fmt.Sprintf("/api/download/%s", downloadID),
 	}
 
 	if err := conn.WriteJSON(response); err != nil {
-		log.Printf("ERROR: Failed to write summary to WebSocket: %v", err)
+		log.Printf("ERROR: Failed to write queue confirmation to WebSocket: %v", err)
 	}
 }
+
 
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. Extract ID from URL
@@ -161,14 +162,23 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 // Run starts the web server.
 func Run() {
-	// Serve static files from the 'frontend' directory
-	fs := http.FileServer(http.Dir("./frontend"))
-	http.Handle("/", fs)
+	amqpURL := os.Getenv("AMQP_URL")
+	if amqpURL == "" {
+		amqpURL = "amqp://guest:guest@rabbitmq:5672/"
+	}
 
-	// Your existing API handlers
+	var err error
+	rabbitMQClient, err = queue.NewRabbitMQClient(amqpURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+	}
+	defer rabbitMQClient.Close()
+
+	// The frontend is now served by Caddy, so we only need the API handlers here.
+	// The Caddy reverse proxy will route requests to these handlers.
 	http.HandleFunc("/api/convert-ws", conversionHandler)
 	http.HandleFunc("/api/download/", downloadHandler)
 
-	log.Println("Starting server on :8080")
+	log.Println("Starting Go backend server on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }

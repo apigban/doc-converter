@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: "rabbitmq:3.12-management-alpine"
+    ports:
+      - "5672:5672"  # AMQP port for services
+      - "15672:15672" # Management UI for monitoring queues
+
+  # Go Backend API (Producer)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile-backend
+    # The backend port is not exposed to the host machine;
+    # it communicates with the frontend via the Caddy proxy.
+    expose:
+      - "8080"
+    depends_on:
+      - rabbitmq
+
+  # Go Worker (Consumer)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile-worker
+    # The worker scales independently. You can increase the replica count here.
+    deploy:
+      replicas: 2 # Example: run 2 worker instances
+    depends_on:
+      - rabbitmq
+
+  # Caddy Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile-frontend
+    ports:
+      - "80:80"       # HTTP
+      - "443:443"     # HTTPS (Caddy will manage certs automatically)
+      - "443:443/udp" # For HTTP/3
+    depends_on:
+      - backend

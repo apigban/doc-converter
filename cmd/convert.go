@@ -94,7 +94,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 	log.Printf("INFO: Loaded %d URLs for processing from %s", len(urls), file)
 
-	c, err := converter.NewConverter(outputDir)
+	c, err := converter.NewConverterForCLI(outputDir)
 	if err != nil {
 		log.Fatalf("Error creating converter: %v", err)
 	}

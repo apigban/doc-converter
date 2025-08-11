@@ -1,0 +1,35 @@
+# Dockerfile for the Go backend
+
+# ---- Build Stage ----
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+# Copy Go modules and download dependencies first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the source code
+COPY . .
+
+# Build the application as a static binary
+# We specify the "server" command to be run from the main package
+RUN CGO_ENABLED=0 go build -o /app/doc-converter .
+
+# ---- Final Stage ----
+FROM alpine:latest
+
+WORKDIR /app
+
+# Copy the static binary from the builder stage
+COPY --from=builder /app/doc-converter .
+
+# The "tmp/downloads" directory needs to be created for the server to write zip files
+# This is still needed for the download handler
+RUN mkdir -p /app/tmp/downloads
+
+# Expose the port the server runs on
+EXPOSE 8080
+
+# Command to run the executable's "server" subcommand
+CMD ["/app/doc-converter", "server"]
