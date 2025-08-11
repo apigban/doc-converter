@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"doc-converter/pkg/converter" // <-- Add this import
 	"doc-converter/pkg/queue"
 	"encoding/json"
 	"fmt"
@@ -11,26 +12,127 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync" // <-- Add this import
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
-// ConversionRequest is the structure of the JSON request from the client
 type ConversionRequest struct {
 	URLs     []string `json:"urls"`
 	Selector string   `json:"selector"`
 }
 
 var (
-	upgrader    = websocket.Upgrader{
+	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			// TODO: Restrict this to your frontend's origin in production
 			return true
 		},
 	}
 	rabbitMQClient *queue.RabbitMQClient
+	// This map will store active WebSocket connections, keyed by job ID.
+	clients      = make(map[string]*websocket.Conn)
+	clientsMutex = &sync.Mutex{}
 )
+
+// This function listens for results from the workers
+func listenForResults() {
+	amqpURL := os.Getenv("AMQP_URL")
+	if amqpURL == "" {
+		amqpURL = "amqp://guest:guest@rabbitmq:5672/"
+	}
+
+	conn, err := amqp.Dial(amqpURL)
+	if err != nil {
+		log.Fatalf("Result listener failed to connect to RabbitMQ: %v", err)
+	}
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("Result listener failed to open a channel: %v", err)
+	}
+	defer ch.Close()
+
+	resultsExchange := "results_fanout"
+	err = ch.ExchangeDeclare(
+		resultsExchange, // name
+		"fanout",        // type
+		true,            // durable
+		false,           // auto-deleted
+		false,           // internal
+		false,           // no-wait
+		nil,             // arguments
+	)
+	if err != nil {
+		log.Fatalf("Result listener failed to declare exchange: %v", err)
+	}
+
+	q, err := ch.QueueDeclare(
+		"",    // name (let RabbitMQ generate a random, temporary name)
+		false, // durable
+		true,  // delete when unused
+		true,  // exclusive
+		false, // no-wait
+		nil,   // arguments
+	)
+	if err != nil {
+		log.Fatalf("Result listener failed to declare queue: %v", err)
+	}
+
+	err = ch.QueueBind(
+		q.Name,          // queue name
+		"",              // routing key
+		resultsExchange, // exchange
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("Result listener failed to bind queue: %v", err)
+	}
+
+	msgs, err := ch.Consume(
+		q.Name, // queue
+		"",     // consumer
+		true,   // auto-ack
+		false,  // exclusive
+		false,  // no-local
+		false,  // no-wait
+		nil,    // args
+	)
+	if err != nil {
+		log.Fatalf("Result listener failed to register a consumer: %v", err)
+	}
+
+	log.Println("INFO: Result listener is running...")
+	for d := range msgs {
+		var summary converter.Summary
+		if err := json.Unmarshal(d.Body, &summary); err != nil {
+			log.Printf("ERROR: Failed to unmarshal result summary: %v", err)
+			continue
+		}
+
+		log.Printf("INFO: Received completion summary for job %s", summary.DownloadID)
+
+		clientsMutex.Lock()
+		// Find the client associated with this job ID
+		if conn, ok := clients[summary.DownloadID]; ok {
+			// Prepare the final message for the UI
+			finalResponse := map[string]interface{}{
+				"status":       "completed",
+				"summary":      summary,
+				"download_url": fmt.Sprintf("/api/download/%s", summary.DownloadID),
+			}
+			// Send the completion message
+			if err := conn.WriteJSON(finalResponse); err != nil {
+				log.Printf("ERROR: Failed to write completion to WebSocket for job %s: %v", summary.DownloadID, err)
+			}
+			// Clean up the connection from the map
+			delete(clients, summary.DownloadID)
+		}
+		clientsMutex.Unlock()
+	}
+}
 
 func conversionHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("INFO: Received new conversion request")
@@ -39,13 +141,12 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ERROR: Failed to upgrade connection: %v", err)
 		return
 	}
-	defer conn.Close()
+	// Note: We don't close the connection here anymore with defer.
+	// It stays open to receive the final result.
 
-	// Read the initial request from the client
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("ERROR: Failed to read message from client: %v", err)
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Failed to read request"))
 		return
 	}
 
@@ -53,27 +154,31 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(msg, &req); err != nil {
 		log.Printf("ERROR: Invalid request format: %v", err)
 		conn.WriteMessage(websocket.TextMessage, []byte("Error: Invalid request format"))
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, "Invalid JSON format"))
 		return
 	}
 
-	if len(req.URLs) == 0 || req.Selector == "" {
-		log.Printf("ERROR: Missing URLs or selector in request")
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, "URLs and selector are required"))
-		return
-	}
-
-	// Generate a unique ID for this conversion job
 	downloadID := uuid.New().String()
 
-	// Create the job payload
+	// Register the client connection before publishing the job
+	clientsMutex.Lock()
+	clients[downloadID] = conn
+	clientsMutex.Unlock()
+
+	// Ensure we clean up if the client disconnects prematurely
+	conn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("INFO: WebSocket closed for job %s with code %d", downloadID, code)
+		clientsMutex.Lock()
+		delete(clients, downloadID)
+		clientsMutex.Unlock()
+		return nil
+	})
+
 	job := &queue.ConversionJob{
 		URLs:       req.URLs,
 		Selector:   req.Selector,
 		DownloadID: downloadID,
 	}
 
-	// Publish the job to RabbitMQ
 	if err := rabbitMQClient.PublishJob(job); err != nil {
 		log.Printf("ERROR: Failed to publish job to queue: %v", err)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Failed to queue job"))
@@ -82,54 +187,43 @@ func conversionHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("INFO: Job %s queued successfully", downloadID)
 
-	// Create a response map to inform the client
-	response := map[string]interface{}{
-		"status":       "queued",
-		"message":      "Your conversion job has been queued successfully.",
-		"download_id":  downloadID,
-		"download_url": fmt.Sprintf("/api/download/%s", downloadID),
+	// Send an initial "log" message back to the UI, not the final response.
+	initialLog := map[string]interface{}{
+		"log":   fmt.Sprintf("Job successfully queued with ID: %s. Waiting for worker...", downloadID),
+		"level": "info",
 	}
 
-	if err := conn.WriteJSON(response); err != nil {
+	if err := conn.WriteJSON(initialLog); err != nil {
 		log.Printf("ERROR: Failed to write queue confirmation to WebSocket: %v", err)
 	}
 }
 
-
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
-	// 1. Extract ID from URL
 	id := strings.TrimPrefix(r.URL.Path, "/api/download/")
 	if id == "" {
 		http.Error(w, "Missing download ID", http.StatusBadRequest)
 		return
 	}
 
-	// 2. Locate temporary directory
 	dirPath := filepath.Join("tmp", "downloads", id)
-	// defer os.RemoveAll(dirPath) // TODO: Temporary solution to Premature Directory Deletion
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		http.NotFound(w, r)
 		return
 	}
 
-	// 3. Set headers
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", id))
 
-	// 4. Create zip archive and stream it
 	zipWriter := zip.NewWriter(w)
 	defer zipWriter.Close()
 
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
-
-		// Create a new file in the zip archive
-		// The path in the zip should be relative to the base directory
 		relPath, err := filepath.Rel(dirPath, path)
 		if err != nil {
 			return err
@@ -138,29 +232,16 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-
-		// Open the file to be zipped
 		fsFile, err := os.Open(path)
 		if err != nil {
 			return err
 		}
 		defer fsFile.Close()
-
-		// Copy the file content to the zip archive
 		_, err = io.Copy(zipFile, fsFile)
 		return err
 	})
-
-	if err != nil {
-		log.Printf("ERROR: Failed to create zip archive for %s: %v", id, err)
-		// Can't set headers anymore, but can try to write an error to the body
-		// This may or may not be seen by the client.
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Failed to create zip archive"))
-	}
 }
 
-// Run starts the web server.
 func Run() {
 	amqpURL := os.Getenv("AMQP_URL")
 	if amqpURL == "" {
@@ -172,10 +253,11 @@ func Run() {
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
-	defer rabbitMQClient.Close()
+	// We don't defer the close here, as the result listener needs it.
 
-	// The frontend is now served by Caddy, so we only need the API handlers here.
-	// The Caddy reverse proxy will route requests to these handlers.
+	// Start the result listener in the background
+	go listenForResults()
+
 	http.HandleFunc("/api/convert-ws", conversionHandler)
 	http.HandleFunc("/api/download/", downloadHandler)
 

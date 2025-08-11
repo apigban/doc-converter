@@ -64,33 +64,31 @@ func main() {
 			var job queue.ConversionJob
 			if err := json.Unmarshal(d.Body, &job); err != nil {
 				log.Printf("ERROR: Failed to unmarshal job: %v", err)
-				// We can't process this message, so we reject it and don't requeue.
 				d.Reject(false)
 				continue
 			}
 
-			// The DownloadID from the job is used to create the correct output directory.
 			c, err := converter.NewConverterForJob(job.DownloadID)
 			if err != nil {
 				log.Printf("ERROR: Failed to create new converter for job %s: %v", job.DownloadID, err)
-				// Reject and don't requeue if we can't even start the conversion.
 				d.Reject(false)
 				continue
 			}
 
-			// The original Convert function is asynchronous. We'll wait for it to complete.
 			resultsChan, summaryChan := c.Convert(job.URLs, job.Selector)
 
-			// Drain the results channel
 			for range resultsChan {
-				// We don't need to do anything with the individual results here,
-				// but we need to consume them to allow the process to complete.
+				// Drain results
 			}
 
-			// Wait for the summary
 			summary := <-summaryChan
 			log.Printf("INFO: Conversion finished for job %s. Successful: %d, Failed: %d",
 				job.DownloadID, summary.Successful, summary.Failed)
+
+			// *** ADD THIS PART ***
+			// Publish the final summary back for the backend to hear
+			publishResults(ch, &summary)
+			// *********************
 
 			// Acknowledge the message now that the work is done.
 			d.Ack(false)
@@ -111,5 +109,44 @@ func main() {
 func failOnError(err error, msg string) {
 	if err != nil {
 		log.Fatalf("%s: %v", msg, err)
+	}
+}
+
+func publishResults(ch *amqp.Channel, summary *converter.Summary) {
+	resultsExchange := "results_fanout"
+	err := ch.ExchangeDeclare(
+		resultsExchange, // name
+		"fanout",        // type
+		true,            // durable
+		false,           // auto-deleted
+		false,           // internal
+		false,           // no-wait
+		nil,             // arguments
+	)
+	if err != nil {
+		log.Printf("ERROR: Failed to declare results exchange: %v", err)
+		return
+	}
+
+	body, err := json.Marshal(summary)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal summary: %v", err)
+		return
+	}
+
+	err = ch.Publish(
+		resultsExchange, // exchange
+		"",              // routing key (not used for fanout)
+		false,           // mandatory
+		false,           // immediate
+		amqp.Publishing{
+			ContentType: "application/json",
+			Body:        body,
+		})
+
+	if err != nil {
+		log.Printf("ERROR: Failed to publish result: %v", err)
+	} else {
+		log.Printf("INFO: Published completion status for job %s", summary.DownloadID)
 	}
 }
