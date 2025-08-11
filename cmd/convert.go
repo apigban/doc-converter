@@ -2,19 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"doc-converter/pkg/converter"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"gopkg.in/yaml.v2" // Added for YAML marshalling
 )
 
 // exitFunc allows os.Exit to be replaced for testing
@@ -87,7 +84,6 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 
 	lines := bytes.Split(data, []byte{'\n'})
-	selector := viper.GetString("selector")
 
 	var urls []string
 	for _, line := range lines {
@@ -98,138 +94,33 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 	log.Printf("INFO: Loaded %d URLs for processing from %s", len(urls), file)
 
-	successCount := 0
-	errorCount := 0
-
-	for _, url := range urls {
-
-		log.Printf("INFO: Fetching URL: %s", url)
-		content, err := processURL(url, selector)
-		if err != nil {
-			log.Printf("ERROR: Failed to process %s: %v", url, err)
-			errorCount++
-			continue
-		}
-
-		// Fetch the document again to get the title and metadata
-		resp, err := http.Get(url)
-		if err != nil {
-			log.Printf("ERROR: Failed to fetch URL for metadata %s: %v", url, err)
-			errorCount++
-			continue
-		}
-		defer resp.Body.Close()
-
-		doc, err := goquery.NewDocumentFromReader(resp.Body)
-		if err != nil {
-			log.Printf("ERROR: Failed to parse HTML for metadata %s: %v", url, err)
-			errorCount++
-			continue
-		}
-
-		// Extract metadata
-		pageMetadata := getMetadata(doc, url)
-		pageMetadata["retrieved_at"] = time.Now().Format(time.RFC3339)
-
-		// Convert content to Markdown
-		markdownContent := htmlToMarkdown(content)
-
-		// Marshal metadata to YAML
-		yamlBytes, yamlErr := yaml.Marshal(pageMetadata)
-		if yamlErr != nil {
-			log.Printf("ERROR: Failed to marshal YAML for %s: %v", url, yamlErr)
-			errorCount++
-			continue
-		}
-
-		// Combine frontmatter and markdown content
-		var buf bytes.Buffer
-		buf.WriteString("---\n")
-		buf.Write(yamlBytes)
-		buf.WriteString("---\n\n")
-		buf.WriteString(markdownContent)
-		finalContent := buf.Bytes()
-		filename := getSanitizedTitle(doc, url) + ".md"
-
-		filePath := filepath.Join(outputDir, filename)
-		err = os.WriteFile(filePath, finalContent, 0644)
-		if err != nil {
-			log.Printf("ERROR: Failed to write file %s: %v", filePath, err)
-			errorCount++
-			continue
-		}
-
-		log.Printf("INFO: Successfully converted: %s -> %s", url, filePath)
-		successCount++
-	}
-}
-
-// processURL fetches the HTML content at the given URL and extracts elements matching the provided selector.
-// On error or if no selection is found, returns a descriptive error including the URL and selector.
-func processURL(url string, selector string) (string, error) {
-	resp, err := http.Get(url)
+	c, err := converter.NewConverter(outputDir)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch URL %s: %v", url, err)
+		log.Fatalf("Error creating converter: %v", err)
 	}
-	defer resp.Body.Close()
+	resultsChan, summaryChan := c.Convert(urls, sel)
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch URL %s: HTTP status %d", url, resp.StatusCode)
-	}
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read HTML for %s: %v", url, err)
-	}
-
-	content := doc.Find(selector)
-	if content.Length() == 0 {
-		return "", fmt.Errorf("could not find content in %s using selector '%s'", url, selector)
-	}
-
-	htmlContent, err := content.Html()
-	if err != nil {
-		return "", fmt.Errorf("failed to get HTML content for selector '%s': %v", selector, err)
-	}
-	return htmlContent, nil
-}
-
-// getSanitizedTitle extracts the title from the document or uses the fallback URL
-// to create a valid filename
-func getSanitizedTitle(doc *goquery.Document, fallbackURL string) string {
-	title := strings.TrimSpace(doc.Find("title").Text())
-	if title == "" {
-		// Use the last part of the URL as fallback
-		parts := strings.Split(fallbackURL, "/")
-		if len(parts) > 0 {
-			title = parts[len(parts)-1]
-			if title == "" && len(parts) > 1 {
-				title = parts[len(parts)-2]
-			}
-		}
-		if title == "" {
-			title = "untitled"
+	// Process results as they come in
+	for result := range resultsChan {
+		if result.IsSuccess {
+			// The file is already written by the converter. We just log it.
+			log.Printf("INFO: Successfully converted: %s -> %s", result.URL, filepath.Join(c.OutputDir, result.FileName))
+		} else {
+			log.Printf("ERROR: Failed to process %s: %s", result.URL, result.Error)
 		}
 	}
-	return SanitizeFilename(title)
-}
 
-// sanitizeFilename converts a string to a valid filename by:
-// 1. Converting to lowercase
-// 2. Replacing spaces with underscores
-// 3. Removing any characters that aren't alphanumeric or underscores
-func SanitizeFilename(s string) string {
-	// Convert to lowercase
-	s = strings.ToLower(s)
+	// Wait for and print the final summary
+	summary := <-summaryChan
+	log.Printf("INFO: Conversion complete.")
+	log.Printf("INFO: Total URLs: %d", summary.TotalURLs)
+	log.Printf("INFO: Successful: %d", summary.Successful)
+	log.Printf("INFO: Failed: %d", summary.Failed)
+	if summary.Failed > 0 {
+		log.Printf("INFO: Failed URLs: %s", strings.Join(summary.FailedURLs, ", "))
+	}
+	log.Printf("INFO: Total processing time: %s", summary.ProcessingTime)
 
-	// Replace spaces with underscores
-	s = strings.ReplaceAll(s, " ", "_")
-
-	// Remove any character that is not alphanumeric or underscore
-	reg := regexp.MustCompile("[^a-z0-9_]+")
-	s = reg.ReplaceAllString(s, "")
-
-	return s
 }
 
 // createRunOutputDir creates a unique, timestamped directory for each execution run
@@ -258,105 +149,4 @@ func createRunOutputDir(parentDir string) (string, error) {
 	}
 
 	return fullPath, nil
-}
-
-// getMetadata extracts relevant metadata from the goquery document.
-func getMetadata(doc *goquery.Document, url string) map[string]interface{} {
-	metadata := make(map[string]interface{})
-
-	// Source URL
-	metadata["source"] = url
-
-	// Title
-	title := strings.TrimSpace(doc.Find("title").Text())
-	if title != "" {
-		metadata["title"] = title
-	}
-
-	// Description from meta tag
-	doc.Find("meta[name='description']").Each(func(i int, s *goquery.Selection) {
-		if desc, exists := s.Attr("content"); exists {
-			metadata["description"] = desc
-		}
-	})
-
-	// Keywords from meta tag
-	doc.Find("meta[name='keywords']").Each(func(i int, s *goquery.Selection) {
-		if keywords, exists := s.Attr("content"); exists {
-			metadata["keywords"] = keywords
-		}
-	})
-
-	return metadata
-}
-
-// htmlToMarkdown converts a given HTML string to Markdown.
-// This is a simplified conversion and might need a more robust library for complex HTML.
-func htmlToMarkdown(htmlContent string) string {
-	// This is a simplified conversion. For robust conversion, a dedicated library like
-	// "github.com/JohannesKaufmann/html-to-markdown" would be used.
-	// For the purpose of this task, we'll implement basic conversions.
-
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
-	if err != nil {
-		log.Printf("ERROR: Failed to parse HTML for markdown conversion: %v", err)
-		return ""
-	}
-
-	var markdownBuilder strings.Builder
-
-	// Create a selection from the document
-	var selection *goquery.Selection
-	body := doc.Find("body")
-	if body.Length() > 0 {
-		selection = body
-	} else {
-		selection = doc.Selection
-	}
-
-	// Find all relevant elements and process them
-	selection.Find("h1, h2, h3, h4, h5, h6, p, a").Each(func(i int, s *goquery.Selection) {
-		tagName := goquery.NodeName(s)
-		text := strings.TrimSpace(s.Text())
-
-		if text == "" {
-			return
-		}
-
-		switch tagName {
-		case "h1":
-			markdownBuilder.WriteString("# " + text + "\n\n")
-		case "h2":
-			markdownBuilder.WriteString("## " + text + "\n\n")
-		case "h3":
-			markdownBuilder.WriteString("### " + text + "\n\n")
-		case "h4":
-			markdownBuilder.WriteString("#### " + text + "\n\n")
-		case "h5":
-			markdownBuilder.WriteString("##### " + text + "\n\n")
-		case "h6":
-			markdownBuilder.WriteString("###### " + text + "\n\n")
-		case "p":
-			markdownBuilder.WriteString(text + "\n\n")
-		case "a":
-			href, exists := s.Attr("href")
-			if exists {
-				markdownBuilder.WriteString(fmt.Sprintf("[%s](%s)", text, href))
-			} else {
-				markdownBuilder.WriteString(text)
-			}
-		}
-	})
-
-	// If no specific tags found, just use the text content
-	if markdownBuilder.Len() == 0 {
-		text := strings.TrimSpace(selection.Text())
-		if text != "" {
-			markdownBuilder.WriteString(text)
-		}
-	}
-
-	// Clean up multiple newlines and trim overall whitespace
-	result := regexp.MustCompile(`\n\n+`).ReplaceAllString(markdownBuilder.String(), "\n\n")
-	return strings.TrimSpace(result)
 }

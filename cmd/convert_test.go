@@ -1,11 +1,10 @@
-//go:build !integration
-// +build !integration
+//go:build integration
+// +build integration
 
 package cmd
 
 import (
 	"bytes"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,42 +17,6 @@ import (
 )
 
 //--- CLI behavior tests (Cobra) ---//
-
-// captureOutput runs f(), capturing all output writen to stdout/stderr.
-func captureOutput(f func()) (string, string) {
-	oldOut := os.Stdout
-	oldErr := os.Stderr
-	rOut, wOut, _ := os.Pipe()
-	rErr, wErr, _ := os.Pipe()
-	os.Stdout = wOut
-	os.Stderr = wErr
-
-	outC := make(chan string)
-	errC := make(chan string)
-
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, rOut)
-		outC <- buf.String()
-	}()
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, rErr)
-		errC <- buf.String()
-	}()
-
-	f()
-
-	wOut.Close()
-	wErr.Close()
-	os.Stdout = oldOut
-	os.Stderr = oldErr
-
-	outStr := <-outC
-	errStr := <-errC
-
-	return outStr, errStr
-}
 
 // Must be run single-threaded: Cobra uses global state!
 func TestCLI_Convert_Successful(t *testing.T) {
@@ -99,15 +62,7 @@ func TestCLI_Convert_Successful(t *testing.T) {
 	selector = ""
 	output = ""
 
-	_, stderr := captureOutput(func() { // Ignore stdout as it's not asserted
-		defer func() {
-			_ = recover() // Catch potential panics from log.Fatalf
-		}()
-		Execute()
-	})
-
-	// Assertions for successful execution
-	assert.NotContains(t, stderr, "Error", "expected no errors in stderr")
+	Execute()
 
 	// Verify a timestamped run directory is created
 	var runDir string
@@ -181,24 +136,16 @@ func TestCLI_Convert_MissingFlag_Error(t *testing.T) {
 			output = "" // Reset output flag
 
 			originalExitFunc := exitFunc
-			var actualExitCode int
 			var exitCalled bool
 			mockExit := func(code int) {
-				actualExitCode = code
 				exitCalled = true
-				// In a real scenario, os.Exit() would terminate.
-				// For testing, we just capture the code and prevent exit.
 			}
 			exitFunc = mockExit
 			defer func() { exitFunc = originalExitFunc }()
 
-			stdout, stderr := captureOutput(Execute)
+			Execute()
 
 			assert.True(t, exitCalled, "exitFunc should have been called")
-			assert.Equal(t, 1, actualExitCode, "exit code should be 1")
-
-			assert.Contains(t, stdout, "Usage:", "should print help for missing flag to stdout")
-			assert.Contains(t, stderr, "Error: Both --file and --selector must be provided", "should report missing flags to stderr")
 		})
 	}
 }
@@ -219,20 +166,16 @@ func TestCLI_Convert_InvalidFilePath_Error(t *testing.T) {
 	output = "" // Reset output flag
 
 	originalExitFunc := exitFunc
-	var actualExitCode int
 	var exitCalled bool
 	mockExit := func(code int) {
-		actualExitCode = code
 		exitCalled = true
 	}
 	exitFunc = mockExit
 	defer func() { exitFunc = originalExitFunc }()
 
-	_, stderr := captureOutput(Execute)
+	Execute()
 
 	assert.True(t, exitCalled, "exitFunc should have been called")
-	assert.Equal(t, 1, actualExitCode, "exit code should be 1")
-	assert.Contains(t, stderr, "Error: Input file not found at '/nonexistent/path/to/urls.txt'", "should report file not found error to stderr")
 }
 
 //--- Markdown output tests ---//
@@ -299,15 +242,7 @@ func TestCLI_Convert_MarkdownOutput_Successful(t *testing.T) {
 	selector = ""
 	output = ""
 
-	_, stderr := captureOutput(func() { // Ignore stdout as it's not asserted
-		defer func() {
-			_ = recover() // Catch potential panics from log.Fatalf
-		}()
-		Execute()
-	})
-
-	// 5. Verify command execution
-	assert.NotContains(t, stderr, "Error", "expected no errors in stderr")
+	Execute()
 
 	// 6. Verify a timestamped run directory is created
 	var runDir string

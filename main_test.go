@@ -1,7 +1,7 @@
 package main
 
 import (
-	"doc-converter/cmd"
+	"doc-converter/pkg/converter"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,7 +23,7 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := cmd.SanitizeFilename(tc.input)
+			actual := converter.SanitizeFilename(tc.input)
 			assert.Equal(t, tc.expected, actual, "For input '%s'", tc.input)
 		})
 	}
